@@ -14,7 +14,7 @@
 
 use anyhow::{bail, Context};
 use jam_core::engine::{start_client_headless, ClientConfig};
-use jam_core::EngineParams;
+use jam_core::{EngineParams, MonitorMode};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -49,6 +49,11 @@ pub fn net_measure(
     code: [u8; 6],
     params: EngineParams,
 ) -> anyhow::Result<MeasureResult> {
+    // Force monitoring off: with direct monitoring the injected click would
+    // appear in the output on the same frame it is sent, so every measurement
+    // would read ~0 ms. We want to time the click's return through the host.
+    let mut params = params;
+    params.monitor = MonitorMode::Off;
     let frame = params.frame_samples;
     let (handle, mut pipeline, mut tx, shared) = start_client_headless(ClientConfig {
         host_addr,

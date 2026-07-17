@@ -286,9 +286,13 @@ fn output_stream(
     xruns: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, EngineError> {
     let channels = negotiated.channels as usize;
-    let mut pending = SampleFifo::new(frame_samples * 16 + 8192);
+    // Capacity generously exceeds any realistic device callback (~1.4 s), so
+    // `pending.len()` can always reach `needed` and the fill loop below never
+    // spins forever even when the driver hands us a very large buffer
+    // (possible when the device reports an unknown buffer size and cpal falls
+    // back to BufferSize::Default).
+    let mut pending = SampleFifo::new(frame_samples * 16 + 65_536);
     let mut frame_buf = vec![0.0f32; frame_samples];
-    let mut mono = vec![0.0f32; 8192];
     let xr = xruns.clone();
     negotiated
         .device
@@ -300,13 +304,21 @@ fn output_stream(
                     process(&mut frame_buf);
                     pending.push(&frame_buf);
                 }
-                let mono = &mut mono[..needed.min(8192)];
-                let popped = pending.pop(mono);
-                debug_assert!(popped);
-                for (out_frame, &s) in data.chunks_exact_mut(channels).zip(mono.iter()) {
-                    for ch in out_frame {
-                        *ch = s;
+                // Drain in frame-sized chunks and fan each mono sample across
+                // the device's channels — no fixed intermediate cap, so large
+                // callbacks are served in full instead of leaving a stale tail.
+                let mut written = 0;
+                while written < needed {
+                    let take = (needed - written).min(frame_buf.len());
+                    let ok = pending.pop(&mut frame_buf[..take]);
+                    debug_assert!(ok);
+                    for (k, &s) in frame_buf[..take].iter().enumerate() {
+                        let base = (written + k) * channels;
+                        for ch in 0..channels {
+                            data[base + ch] = s;
+                        }
                     }
+                    written += take;
                 }
             },
             move |_err| {
@@ -338,6 +350,13 @@ fn start_host_audio(
         &output,
         frame,
         move |host_out: &mut [f32]| {
+            // Bound capture latency against input/output clock drift: with
+            // independent devices the input clock may run faster, so without
+            // this the ring would fill and add a fixed quarter-second of
+            // latency. Keep at most a few frames queued, dropping the oldest.
+            while cap_cons.slots() > frame * 4 {
+                let _ = cap_cons.pop();
+            }
             if cap_cons.slots() >= frame {
                 for x in local_in.iter_mut() {
                     *x = cap_cons.pop().unwrap_or(0.0);
@@ -383,6 +402,11 @@ fn start_client_audio(
         &output,
         frame,
         move |out: &mut [f32]| {
+            // Bound capture latency against input/output clock drift (see the
+            // host path for the rationale).
+            while cap_cons.slots() > frame * 4 {
+                let _ = cap_cons.pop();
+            }
             if cap_cons.slots() >= frame {
                 for x in local_in.iter_mut() {
                     *x = cap_cons.pop().unwrap_or(0.0);

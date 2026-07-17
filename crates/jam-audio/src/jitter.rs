@@ -261,7 +261,11 @@ impl JitterBuffer {
             *dst = src.load(Ordering::Relaxed);
         }
         // Re-check generation: if a writer overwrote this slot mid-copy the
-        // seq or state changed and the copy is torn — discard it.
+        // seq or state changed and the copy is torn — discard it. The Acquire
+        // fence keeps the relaxed payload loads above from being reordered
+        // after this recheck on weakly-ordered hardware (ARM), so a torn copy
+        // cannot slip past the state/seq comparison.
+        std::sync::atomic::fence(Ordering::Acquire);
         if slot.state.load(Ordering::Acquire) != STATE_WRITTEN
             || slot.seq.load(Ordering::Relaxed) != expect
         {

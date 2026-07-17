@@ -25,8 +25,13 @@ pub const UNJOINED_SENDER_ID: u16 = 0xFFFF;
 
 pub const ROOM_CODE_LEN: usize = 6;
 pub const MAX_NAME_LEN: usize = 32;
-/// Upper bound on any datagram we send; fits well inside a 1500-byte MTU.
-pub const MAX_DATAGRAM: usize = 1400;
+/// Upper bound on any datagram we send. Opus frames keep datagrams well
+/// inside a 1500-byte MTU; the ceiling is sized for the worst legal case —
+/// PCM f32 at a 5 ms frame (960 bytes) carried with redundancy (a second
+/// 960-byte copy) plus headers ≈ 1938 bytes — so serialization can never
+/// overflow the fixed send buffers and panic the audio callback. Such large
+/// datagrams only occur in `--pcm` mode, which is LAN-only by design.
+pub const MAX_DATAGRAM: usize = 2048;
 
 /// Reliable-control retransmit interval and attempt cap (100 ms x 10).
 pub const CONTROL_RETRY_MS: u64 = 100;

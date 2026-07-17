@@ -117,7 +117,7 @@ pub fn spawn_host_control(
                        shared: &HostShared,
                        addr_to_rx: &Sender<AddrUpdate>,
                        addr_to_tx: &Sender<AddrUpdate>,
-                       clock: &Clock,
+                       _clock: &Clock,
                        actions: Vec<HostAction>| {
                 for action in actions {
                     match action {
@@ -133,7 +133,14 @@ pub fn spawn_host_control(
                             let addr = hs.client_addr(sender_id);
                             let stream = &shared.clients[slot];
                             stream.jb.reset();
-                            stream.last_rx_us.store(clock.now_us(), Ordering::Release);
+                            // Deliberately do NOT prime last_rx_us here: the
+                            // liveness feed below turns a nonzero last_rx_us
+                            // into mark_heard, which would implicitly ack our
+                            // own WELCOME and kill its retransmission. The
+                            // handshake's own last_heard (set in on_hello)
+                            // guards the join timeout until real audio/ACK
+                            // arrives from the client.
+                            stream.last_rx_us.store(0, Ordering::Release);
                             stream.rtt_us.store(0, Ordering::Relaxed);
                             stream.active.store(true, Ordering::Release);
                             names[slot] = Some(name);
@@ -221,23 +228,35 @@ pub fn spawn_host_control(
                                 }
                             }
                             Control::Bye => {
-                                let actions = hs.on_bye(ev.from);
-                                run(
-                                    &mut hs,
-                                    &mut io,
-                                    &mut names,
-                                    &shared,
-                                    &addr_to_rx,
-                                    &addr_to_tx,
-                                    &clock,
-                                    actions,
-                                );
+                                // Ignore a BYE that doesn't carry our session
+                                // id: a spoofed one must not drop a client.
+                                if ev.header.session_id == shared.session_id {
+                                    let actions = hs.on_bye(ev.from);
+                                    run(
+                                        &mut hs,
+                                        &mut io,
+                                        &mut names,
+                                        &shared,
+                                        &addr_to_rx,
+                                        &addr_to_tx,
+                                        &clock,
+                                        actions,
+                                    );
+                                }
                             }
                             _ => {}
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return,
+                    // The RX thread dropped its ctrl_tx during shutdown. Say
+                    // goodbye so clients tear down immediately instead of
+                    // waiting out the 5 s liveness timeout.
+                    Err(RecvTimeoutError::Disconnected) => {
+                        for (_, addr) in hs.client_addrs() {
+                            io.send(&Control::Bye, shared.session_id, HOST_SENDER_ID, addr);
+                        }
+                        return;
+                    }
                 }
 
                 // Feed audio-path liveness into the handshake machine.
@@ -442,15 +461,24 @@ pub fn spawn_client_control(
                             update_rtt(&shared.from_host.rtt_us, rtt);
                         }
                         Control::Bye => {
-                            shared.joined.store(false, Ordering::Release);
-                            shared.from_host.jb.reset();
-                            terminal_status = Some("host ended the session".into());
-                            rejoin_deadline = None;
+                            // Only honor a BYE stamped with our session id, so
+                            // a spoofed datagram can't kick us off.
+                            if ev.header.session_id == shared.session_id.load(Ordering::Acquire) {
+                                shared.joined.store(false, Ordering::Release);
+                                shared.from_host.jb.reset();
+                                terminal_status = Some("host ended the session".into());
+                                rejoin_deadline = None;
+                            }
                         }
                         _ => {}
                     },
                     Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        if shared.joined.load(Ordering::Acquire) {
+                            send_ctrl(&mut io, &shared, &Control::Bye);
+                        }
+                        return;
+                    }
                 }
 
                 actions.extend(cs.tick(now_ms));
@@ -463,8 +491,23 @@ pub fn spawn_client_control(
                         ClientAction::StartAudio {
                             sender_id,
                             session_id,
-                            ..
+                            params,
                         } => {
+                            // The audio pipeline was built from this client's
+                            // own CLI flags before the handshake; we can't
+                            // reconfigure it here. If the host negotiated a
+                            // different frame size or codec, our encoder/
+                            // decoder won't line up and audio would be silent,
+                            // so warn loudly instead of failing quietly.
+                            if params.frame_samples as usize != cfg.params.frame_samples
+                                || params.codec != cfg.params.codec
+                            {
+                                terminal_status = Some(format!(
+                                    "parameter mismatch: host uses {:?} at {} samples/frame — \
+                                     restart with matching --codec/--frame",
+                                    params.codec, params.frame_samples
+                                ));
+                            }
                             shared.from_host.jb.reset();
                             shared
                                 .from_host
@@ -475,6 +518,11 @@ pub fn spawn_client_control(
                             shared.joined.store(true, Ordering::Release);
                             // Fresh join window for any later disconnect.
                             rejoin_deadline = Some(now_ms + REJOIN_WINDOW_MS);
+                            // A restarted host resets its control SeqGen, so
+                            // its new roster seqs may look "older" than what we
+                            // saw from the previous instance. Forget the dedup
+                            // watermark on every (re)join.
+                            last_roster_seq = None;
                         }
                         ClientAction::RosterUpdate(r) => roster = r,
                         ClientAction::Failed(failure) => {

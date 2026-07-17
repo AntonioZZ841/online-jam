@@ -111,14 +111,28 @@ interface's converter latency.
 - Mouth-to-ear ≈ echo measurement + loopback measurement. The status
   display's estimate cross-checks against these.
 
+> **All players must use the same `--frame` and codec (`--pcm` or not).** The
+> host fixes these for the session; if a client's flags disagree, it joins but
+> the status line shows a "parameter mismatch" warning and audio stays silent
+> until you restart with matching flags. (Automatic reconfiguration from the
+> host's WELCOME is on the roadmap.)
+
 ## Security model (MVP)
 
 Traffic is **unencrypted** UDP; the room code (sent in the handshake) gates
-entry, source addresses are pinned per player, and stray/spoofed packets are
-dropped by session id + address checks. Treat sessions like a phone call on
-an untrusted network: fine for jamming, not for secrets. Encrypted transport
-(DTLS/QUIC) is a planned upgrade; the version field in every packet makes
-the migration non-breaking.
+entry, source addresses are pinned per player, session ids scope every
+packet, and BYE/audio are dropped unless they carry the right session id.
+Treat sessions like a phone call on an untrusted network: fine for jamming,
+not for secrets. Encrypted transport (DTLS/QUIC) is a planned upgrade; the
+version field in every packet makes the migration non-breaking.
+
+Known residual exposure for an attacker who can both guess the (public) room
+code *and* forge UDP source addresses on your path: the diagnostic `PING`
+echo is answered without a session check (a minor ~2× reflection vector), and
+the 16-bit session id is brute-forceable in the worst case. These are
+acceptable for the "jamming with friends" threat model and close fully once
+encrypted transport lands. Don't expose a host to the open internet you
+wouldn't also expose a game server to.
 
 ## How it works
 
