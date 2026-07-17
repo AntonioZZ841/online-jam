@@ -1,0 +1,19 @@
+[package]
+name = "jam-audio"
+description = "Real-time audio primitives for the jam tool: codec wrappers, lock-free jitter buffer, mixer, meters, drift resampler, device helpers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jam-protocol = { workspace = true }
+cpal = { workspace = true }
+opus = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []
+# JACK backend on Linux/BSD (requires libjack headers at build time).
+jack = ["cpal/jack"]
+# ASIO backend on Windows (requires the Steinberg ASIO SDK; see README).
+asio = ["cpal/asio"]
