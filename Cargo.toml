@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/AntonioZZ841/online-jam"
+
+[workspace.dependencies]
+jam-protocol = { path = "crates/jam-protocol" }
+jam-audio = { path = "crates/jam-audio" }
+jam-core = { path = "crates/jam-core" }
+
+cpal = "0.15"
+opus = "0.3"
+rtrb = "0.3"
+triple_buffer = "8"
+crossbeam-channel = "0.5"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+proptest = "1"
+
+# The audio callback must never miss its deadline; keep the hot path fast
+# even in debug/test builds.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
