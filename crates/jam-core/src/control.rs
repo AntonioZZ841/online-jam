@@ -227,22 +227,20 @@ pub fn spawn_host_control(
                                     }
                                 }
                             }
-                            Control::Bye => {
-                                // Ignore a BYE that doesn't carry our session
-                                // id: a spoofed one must not drop a client.
-                                if ev.header.session_id == shared.session_id {
-                                    let actions = hs.on_bye(ev.from);
-                                    run(
-                                        &mut hs,
-                                        &mut io,
-                                        &mut names,
-                                        &shared,
-                                        &addr_to_rx,
-                                        &addr_to_tx,
-                                        &clock,
-                                        actions,
-                                    );
-                                }
+                            // Ignore a BYE that doesn't carry our session id:
+                            // a spoofed one must not drop a client.
+                            Control::Bye if ev.header.session_id == shared.session_id => {
+                                let actions = hs.on_bye(ev.from);
+                                run(
+                                    &mut hs,
+                                    &mut io,
+                                    &mut names,
+                                    &shared,
+                                    &addr_to_rx,
+                                    &addr_to_tx,
+                                    &clock,
+                                    actions,
+                                );
                             }
                             _ => {}
                         }
@@ -460,15 +458,16 @@ pub fn spawn_client_control(
                             let rtt = rtt_from_pong(ev.rx_us, *t1_us, *t2_us, *t3_us);
                             update_rtt(&shared.from_host.rtt_us, rtt);
                         }
-                        Control::Bye => {
-                            // Only honor a BYE stamped with our session id, so
-                            // a spoofed datagram can't kick us off.
-                            if ev.header.session_id == shared.session_id.load(Ordering::Acquire) {
-                                shared.joined.store(false, Ordering::Release);
-                                shared.from_host.jb.reset();
-                                terminal_status = Some("host ended the session".into());
-                                rejoin_deadline = None;
-                            }
+                        // Only honor a BYE stamped with our session id, so a
+                        // spoofed datagram can't kick us off.
+                        Control::Bye
+                            if ev.header.session_id
+                                == shared.session_id.load(Ordering::Acquire) =>
+                        {
+                            shared.joined.store(false, Ordering::Release);
+                            shared.from_host.jb.reset();
+                            terminal_status = Some("host ended the session".into());
+                            rejoin_deadline = None;
                         }
                         _ => {}
                     },
