@@ -162,7 +162,17 @@ impl JitterBuffer {
         }
         // Claim the slot. Whatever was here is either consumed (EMPTY) or at
         // least a full ring older than the incoming packet — overwrite it.
-        slot.state.store(STATE_WRITING, Ordering::Release);
+        //
+        // The release fence after the WRITING marker orders that marker before
+        // the relaxed seq/len/payload stores that follow. Paired with the
+        // reader's acquire fence in `take`, this guarantees that a reader which
+        // observes any of this generation's (torn) payload bytes also observes
+        // the changed state/seq on its recheck — closing the torn-read window
+        // on weakly-ordered hardware. Without it, a release *store* only orders
+        // earlier ops before itself, leaving the later relaxed stores free to
+        // become visible ahead of the marker.
+        slot.state.store(STATE_WRITING, Ordering::Relaxed);
+        std::sync::atomic::fence(Ordering::Release);
         slot.seq.store(incoming_seq, Ordering::Relaxed);
         slot.timestamp.store(timestamp, Ordering::Relaxed);
         slot.len.store(payload.len() as u16, Ordering::Relaxed);

@@ -141,7 +141,7 @@ pub fn spawn_rx(
     std::thread::Builder::new()
         .name("jam-net-rx".into())
         .spawn(move || {
-            let mut buf = [0u8; 2048];
+            let mut buf = [0u8; MAX_DATAGRAM];
             // Host role: authoritative addr->slot map, mirrored from control.
             let mut client_addrs: [Option<SocketAddr>; MAX_CLIENTS] = [None; MAX_CLIENTS];
             let mut jitters: Vec<ArrivalJitter> = (0..MAX_CLIENTS.max(1))

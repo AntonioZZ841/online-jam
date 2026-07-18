@@ -344,17 +344,21 @@ fn start_host_audio(
 
     let mut pipeline = HostPipeline::new(params)?;
     let frame = params.frame_samples;
+    // Bound extra capture latency against input/output clock drift, but never
+    // below one device callback's worth of samples plus headroom — otherwise a
+    // large output buffer (e.g. --buffer 512 > 4 frames) would consume more
+    // per callback than the cap allows and starve every cycle with no drift.
+    let drift_cap = (frame * 4).max(audio.hw_buffer as usize * 2);
     let mut local_in = vec![0.0f32; frame];
     let sh = shared.clone();
     let out_stream = output_stream(
         &output,
         frame,
         move |host_out: &mut [f32]| {
-            // Bound capture latency against input/output clock drift: with
-            // independent devices the input clock may run faster, so without
-            // this the ring would fill and add a fixed quarter-second of
-            // latency. Keep at most a few frames queued, dropping the oldest.
-            while cap_cons.slots() > frame * 4 {
+            // With independent devices the input clock may run faster, so
+            // without this the ring would fill and add a fixed quarter-second
+            // of latency. Keep occupancy bounded, dropping the oldest samples.
+            while cap_cons.slots() > drift_cap {
                 let _ = cap_cons.pop();
             }
             if cap_cons.slots() >= frame {
@@ -396,6 +400,9 @@ fn start_client_audio(
 
     let mut pipeline = ClientPipeline::new(params)?;
     let frame = params.frame_samples;
+    // See the host path for the rationale; the cap must cover one device
+    // callback so a large --buffer doesn't starve every cycle.
+    let drift_cap = (frame * 4).max(audio.hw_buffer as usize * 2);
     let mut local_in = vec![0.0f32; frame];
     let sh = shared.clone();
     let out_stream = output_stream(
@@ -404,7 +411,7 @@ fn start_client_audio(
         move |out: &mut [f32]| {
             // Bound capture latency against input/output clock drift (see the
             // host path for the rationale).
-            while cap_cons.slots() > frame * 4 {
+            while cap_cons.slots() > drift_cap {
                 let _ = cap_cons.pop();
             }
             if cap_cons.slots() >= frame {
