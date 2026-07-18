@@ -1,4 +1,6 @@
 mod cli;
+#[cfg(feature = "gui")]
+mod gui;
 mod measure;
 mod status_ui;
 mod stun;
@@ -51,6 +53,31 @@ fn devices() -> anyhow::Result<()> {
     }
     println!("\n(* = system default; pick with --input/--output <name substring>)");
     Ok(())
+}
+
+/// Runs the session-facing UI: the egui window when `--gui` was passed (and
+/// compiled in), the terminal display otherwise.
+fn run_session_ui(
+    want_gui: bool,
+    title: &str,
+    snapshot: &jam_core::stats::SharedSnapshot,
+    shared: status_ui::UiShared,
+    xruns: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> anyhow::Result<()> {
+    if want_gui {
+        #[cfg(feature = "gui")]
+        {
+            return gui::run(title, snapshot.clone(), shared, xruns.clone());
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            let _ = title;
+            anyhow::bail!(
+                "this build has no GUI — rebuild with `cargo build --release --features gui`"
+            );
+        }
+    }
+    status_ui::run(snapshot, &shared, xruns)
 }
 
 fn resolve(host: &str) -> anyhow::Result<SocketAddr> {
@@ -112,12 +139,16 @@ fn host(args: HostArgs) -> anyhow::Result<()> {
     if args.echo {
         println!("  echo mode: each player hears their own audio looped back (measurement)");
     }
-    println!("\npress any key to open the session display...");
-    let _ = std::io::stdin().read_line(&mut String::new());
+    if !args.gui {
+        println!("\npress any key to open the session display...");
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
 
-    status_ui::run(
+    run_session_ui(
+        args.gui,
+        &format!("jam — hosting {code_str}"),
         &handle.snapshot,
-        &status_ui::UiShared::Host(shared),
+        status_ui::UiShared::Host(shared),
         &handle.xruns,
     )?;
     handle.shutdown();
@@ -141,9 +172,11 @@ fn join(args: JoinArgs) -> anyhow::Result<()> {
     })
     .context("starting client session")?;
 
-    status_ui::run(
+    run_session_ui(
+        args.gui,
+        &format!("jam — {}", args.host),
         &handle.snapshot,
-        &status_ui::UiShared::Client(shared),
+        status_ui::UiShared::Client(shared),
         &handle.xruns,
     )?;
     handle.shutdown();

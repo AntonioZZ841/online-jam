@@ -33,5 +33,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build
         run: cargo build --workspace
+      - name: Build (gui feature)
+        run: cargo build -p jam-app --features gui
       - name: Test
         run: cargo test --workspace

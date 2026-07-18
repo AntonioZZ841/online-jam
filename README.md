@@ -56,6 +56,14 @@ The status display shows per-player level meters, packet loss, jitter-buffer
 depth, RTT, and an estimated mouth-to-ear latency. Adjust per-player gains
 with the keyboard (`0-4` select, `+`/`-` adjust).
 
+Prefer a window? Build with the GUI and pass `--gui` to `host`/`join` for
+an egui session window with faders and meters:
+
+```console
+$ cargo build --release --features gui
+$ ./target/release/jam host --gui
+```
+
 ## Reaching the host (NAT)
 
 Clients connect **to** the host's UDP port, so the host must be reachable.
@@ -165,9 +173,11 @@ every client, mixes with per-player smoothed gains, and returns
 
 Packet loss → Opus PLC conceals a 2.5 ms gap (inaudible in the common
 case); `--redundancy` piggybacks the previous frame on every packet.
-Clock drift between sound cards → the jitter buffer drops/inserts one frame
-at quiet moments (a PI-controlled resampler is on the roadmap — the module
-already exists in `jam-audio::resample`).
+Clock drift between sound cards → a PI-controlled cubic-Hermite fractional
+resampler continuously rate-matches each incoming stream (soak-tested
+against ±200 ppm offsets); coarse frame drop/insert at quiet moments
+remains as a fallback for step changes, and `--no-drift` disables the
+resampler entirely.
 
 ## Development
 
@@ -190,6 +200,5 @@ loss testing on platforms without netem.
 ## Roadmap
 
 - rendezvous server + UDP hole punching (skip port forwarding)
-- PI-controlled fractional resampler for continuous drift correction
 - percentile-based (NetEQ-style) jitter estimator for bursty WiFi links
-- stereo mixes, egui GUI, encrypted transport
+- stereo mixes, encrypted transport
