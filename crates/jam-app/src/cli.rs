@@ -58,6 +58,10 @@ pub struct AudioArgs {
     /// Fix the jitter buffer at N frames instead of adapting (testing).
     #[arg(long)]
     pub jitter: Option<i32>,
+    /// Disable continuous clock-drift correction (falls back to occasional
+    /// frame drop/insert at quiet moments).
+    #[arg(long)]
+    pub no_drift: bool,
     /// Use raw PCM instead of Opus (LAN only; ~1 Mbit/s per stream).
     #[arg(long)]
     pub pcm: bool,
@@ -90,6 +94,7 @@ impl AudioArgs {
             redundancy: self.redundancy,
             monitor,
             jitter_fixed: self.jitter,
+            drift_correction: !self.no_drift,
             simulate_loss: self.simulate_loss / 100.0,
             echo,
         })
@@ -113,6 +118,10 @@ pub struct HostArgs {
     /// Skip the public-IP (STUN) lookup.
     #[arg(long)]
     pub no_stun: bool,
+    /// Open a graphical session window instead of the terminal display
+    /// (requires a build with `--features gui`).
+    #[arg(long)]
+    pub gui: bool,
     #[command(flatten)]
     pub audio: AudioArgs,
 }
@@ -127,6 +136,10 @@ pub struct JoinArgs {
     /// Your display name.
     #[arg(long, default_value = "player")]
     pub name: String,
+    /// Open a graphical session window instead of the terminal display
+    /// (requires a build with `--features gui`).
+    #[arg(long)]
+    pub gui: bool,
     #[command(flatten)]
     pub audio: AudioArgs,
 }

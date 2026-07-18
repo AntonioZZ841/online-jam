@@ -318,6 +318,7 @@ pub struct PlayoutController {
     /// interrupted and the buffer re-primes from scratch.
     reset_after_misses: u32,
     pending: Adjust,
+    deadband: i32,
 }
 
 impl PlayoutController {
@@ -336,6 +337,7 @@ impl PlayoutController {
             consecutive_misses: 0,
             reset_after_misses: (500_000.0 / frame_us) as u32, // ~0.5 s
             pending: Adjust::None,
+            deadband: 1,
         }
     }
 
@@ -391,15 +393,21 @@ impl PlayoutController {
         false
     }
 
+    /// Widens the drop/insert deadband. Used when a continuous resampler
+    /// handles fine drift, leaving step corrections only for real jumps.
+    pub fn set_deadband(&mut self, frames: i32) {
+        self.deadband = frames.max(1);
+    }
+
     /// Called once per frame tick with the current depth; latches a pending
     /// one-frame correction when depth drifts out of the deadband.
     pub fn observe_depth(&mut self, depth: i32) {
         if self.pending != Adjust::None || !self.primed {
             return;
         }
-        if depth > self.target + 1 {
+        if depth > self.target + self.deadband {
             self.pending = Adjust::DropOne;
-        } else if depth < self.target - 1 {
+        } else if depth < self.target - self.deadband {
             self.pending = Adjust::InsertOne;
         }
     }

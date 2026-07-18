@@ -53,6 +53,9 @@ pub struct EngineParams {
     pub monitor: MonitorMode,
     /// Fix the jitter buffer at N frames instead of adapting.
     pub jitter_fixed: Option<i32>,
+    /// Continuous clock-drift correction via fractional resampling (M8).
+    /// When false, falls back to coarse drop/insert-at-quiet-moments only.
+    pub drift_correction: bool,
     /// Drop this fraction of outgoing packets (dev/testing).
     pub simulate_loss: f32,
     /// Host only: loop each client's own audio back instead of the mix
@@ -70,6 +73,7 @@ impl Default for EngineParams {
             redundancy: false,
             monitor: MonitorMode::Direct,
             jitter_fixed: None,
+            drift_correction: true,
             simulate_loss: 0.0,
             echo: false,
         }
