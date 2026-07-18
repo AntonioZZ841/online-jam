@@ -75,6 +75,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
+          # Pin a dispatch-created tag to the commit that was actually built
+          # (otherwise the API tags the default-branch HEAD at release time).
+          target_commitish: ${{ github.sha }}
           name: jam ${{ steps.tag.outputs.tag }}
           files: |
             jam-*.tar.gz
