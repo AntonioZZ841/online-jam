@@ -28,6 +28,15 @@ $ cargo build --release
 $ ./target/release/jam devices          # check your interface shows up
 ```
 
+If the build fails on Windows/macOS with a CMake error about
+`cmake_minimum_required` compatibility, your CMake is 4.x and the bundled
+libopus needs the compatibility switch:
+
+```console
+$ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo build --release        # mac/linux
+> $env:CMAKE_POLICY_VERSION_MINIMUM="3.5"; cargo build --release  # powershell
+```
+
 **Host** (the player with the best upload bandwidth):
 
 ```console
