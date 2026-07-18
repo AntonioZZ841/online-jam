@@ -1,0 +1,12 @@
+[package]
+name = "jam-protocol"
+description = "Wire format, sequence arithmetic, and handshake state machines for the jam session protocol. Pure data, no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

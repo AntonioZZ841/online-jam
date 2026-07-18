@@ -7,6 +7,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The bundled libopus (audiopus_sys) declares a cmake_minimum_required
+  # older than CMake 4.x accepts; this opts into the compatibility path.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   test:
@@ -30,5 +33,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build
         run: cargo build --workspace
+      - name: Build (gui feature)
+        run: cargo build -p jam-app --features gui
       - name: Test
         run: cargo test --workspace

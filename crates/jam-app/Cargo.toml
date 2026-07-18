@@ -1,0 +1,28 @@
+[package]
+name = "jam-app"
+description = "The `jam` binary: host or join a low-latency online jam session."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "jam"
+path = "src/main.rs"
+
+[dependencies]
+jam-protocol = { workspace = true }
+jam-audio = { workspace = true }
+jam-core = { workspace = true }
+cpal = { workspace = true }
+clap = { workspace = true }
+crossterm = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+eframe = { workspace = true, optional = true }
+
+[features]
+default = []
+jack = ["jam-audio/jack"]
+asio = ["jam-audio/asio"]
+gui = ["dep:eframe"]

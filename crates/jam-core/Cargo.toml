@@ -1,0 +1,15 @@
+[package]
+name = "jam-core"
+description = "Session glue for the jam tool: host/client audio pipelines, UDP receive/transmit threads, control-plane loops, stats."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jam-protocol = { workspace = true }
+jam-audio = { workspace = true }
+cpal = { workspace = true }
+rtrb = { workspace = true }
+crossbeam-channel = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
