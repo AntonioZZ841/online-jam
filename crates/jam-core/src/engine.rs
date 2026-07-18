@@ -251,22 +251,63 @@ pub fn start_client(cfg: ClientConfig) -> Result<(SessionHandle, Arc<ClientShare
 // cpal stream wiring
 // ---------------------------------------------------------------------------
 
+/// Instantiates a callback for the device's raw sample format, converting
+/// to/from our internal f32 at the edge.
+macro_rules! per_format {
+    ($format:expr, $build:ident, $($arg:expr),*) => {
+        match $format {
+            cpal::SampleFormat::F32 => $build::<f32>($($arg),*),
+            cpal::SampleFormat::I32 => $build::<i32>($($arg),*),
+            cpal::SampleFormat::I16 => $build::<i16>($($arg),*),
+            cpal::SampleFormat::U16 => $build::<u16>($($arg),*),
+            cpal::SampleFormat::F64 => $build::<f64>($($arg),*),
+            cpal::SampleFormat::U32 => $build::<u32>($($arg),*),
+            cpal::SampleFormat::I8 => $build::<i8>($($arg),*),
+            cpal::SampleFormat::U8 => $build::<u8>($($arg),*),
+            cpal::SampleFormat::I64 => $build::<i64>($($arg),*),
+            cpal::SampleFormat::U64 => $build::<u64>($($arg),*),
+            other => Err(EngineError::Stream(format!(
+                "unsupported device sample format {other:?}"
+            ))),
+        }
+    };
+}
+
 /// Extracts channel 0 from an interleaved input callback into the capture
 /// ring; drops samples if the ring is full (the pipeline handles gaps).
 fn input_stream(
     negotiated: &Negotiated,
-    mut prod: rtrb::Producer<f32>,
+    prod: rtrb::Producer<f32>,
     xruns: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, EngineError> {
+    per_format!(
+        negotiated.sample_format,
+        build_input,
+        negotiated,
+        prod,
+        xruns
+    )
+}
+
+fn build_input<T>(
+    negotiated: &Negotiated,
+    mut prod: rtrb::Producer<f32>,
+    xruns: Arc<AtomicU64>,
+) -> Result<cpal::Stream, EngineError>
+where
+    T: cpal::SizedSample,
+    f32: cpal::FromSample<T>,
+{
+    use cpal::Sample;
     let channels = negotiated.channels as usize;
     let xr = xruns.clone();
     negotiated
         .device
         .build_input_stream(
             &negotiated.config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            move |data: &[T], _: &cpal::InputCallbackInfo| {
                 for frame in data.chunks_exact(channels) {
-                    let _ = prod.push(frame[0]);
+                    let _ = prod.push(f32::from_sample(frame[0]));
                 }
             },
             move |_err| {
@@ -282,9 +323,28 @@ fn input_stream(
 fn output_stream(
     negotiated: &Negotiated,
     frame_samples: usize,
-    mut process: impl FnMut(&mut [f32]) + Send + 'static,
+    process: impl FnMut(&mut [f32]) + Send + 'static,
     xruns: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, EngineError> {
+    per_format!(
+        negotiated.sample_format,
+        build_output,
+        negotiated,
+        frame_samples,
+        process,
+        xruns
+    )
+}
+
+fn build_output<T>(
+    negotiated: &Negotiated,
+    frame_samples: usize,
+    mut process: impl FnMut(&mut [f32]) + Send + 'static,
+    xruns: Arc<AtomicU64>,
+) -> Result<cpal::Stream, EngineError>
+where
+    T: cpal::SizedSample + cpal::FromSample<f32>,
+{
     let channels = negotiated.channels as usize;
     // Capacity generously exceeds any realistic device callback (~1.4 s), so
     // `pending.len()` can always reach `needed` and the fill loop below never
@@ -298,7 +358,7 @@ fn output_stream(
         .device
         .build_output_stream(
             &negotiated.config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
                 let needed = data.len() / channels;
                 while pending.len() < needed {
                     process(&mut frame_buf);
@@ -314,8 +374,9 @@ fn output_stream(
                     debug_assert!(ok);
                     for (k, &s) in frame_buf[..take].iter().enumerate() {
                         let base = (written + k) * channels;
+                        let v = T::from_sample(s);
                         for ch in 0..channels {
-                            data[base + ch] = s;
+                            data[base + ch] = v;
                         }
                     }
                     written += take;

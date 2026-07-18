@@ -1,9 +1,10 @@
 //! cpal device discovery and stream-config negotiation.
 //!
-//! Policy (MVP): the session runs at 48 kHz mono f32 end to end. We pick the
-//! requested (or default) device, ask for a 48 kHz f32 config with the
-//! requested buffer size, and fail with an actionable error if the device
-//! cannot do that (see README — almost every interface can).
+//! Policy: the session runs at 48 kHz mono f32 internally. We pick the
+//! requested (or default) device and the friendliest raw format it offers
+//! at 48 kHz (f32 preferred; 16/24/32-bit integer formats are converted at
+//! the callback edge), failing with an actionable error only when no
+//! convertible format covers 48 kHz.
 
 use crate::SAMPLE_RATE;
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -16,7 +17,7 @@ pub enum DeviceError {
         kind: &'static str,
         name: Option<String>,
     },
-    #[error("device \"{0}\" does not support 48 kHz f32 {1}: {2}")]
+    #[error("device \"{0}\" has no usable 48 kHz {1} format: {2}")]
     Unsupported(String, &'static str, String),
     #[error("cpal: {0}")]
     Cpal(String),
@@ -107,12 +108,37 @@ pub struct Negotiated {
     pub config: StreamConfig,
     /// Channel count of the raw device stream; we take/duplicate channel 0.
     pub channels: u16,
+    /// The raw sample format the device stream uses; the engine converts
+    /// to/from f32 at the callback edge.
+    pub sample_format: SampleFormat,
+}
+
+/// Preference order for raw device formats. Anything here can be converted
+/// to/from f32 losslessly enough for audio; f32 is a no-op, I32 covers the
+/// common 24-bit-in-32 pro interfaces (e.g. on WASAPI), then the rest.
+fn format_rank(format: SampleFormat) -> Option<u8> {
+    Some(match format {
+        SampleFormat::F32 => 0,
+        SampleFormat::I32 => 1,
+        SampleFormat::I16 => 2,
+        SampleFormat::U16 => 3,
+        SampleFormat::F64 => 4,
+        SampleFormat::U32 => 5,
+        SampleFormat::I8 => 6,
+        SampleFormat::U8 => 7,
+        SampleFormat::I64 => 8,
+        SampleFormat::U64 => 9,
+        _ => return None,
+    })
 }
 
 fn negotiate(device: Device, input: bool, buffer_frames: u32) -> Result<Negotiated, DeviceError> {
     let dev_name = device.name().unwrap_or_else(|_| "<unknown>".into());
     let kind = if input { "input" } else { "output" };
-    let mut best: Option<(u16, SupportedBufferSize)> = None;
+    // Best = (format rank, channel count): prefer the friendliest format,
+    // then the fewest channels (mono capture ideal, stereo fine).
+    let mut best: Option<(u8, u16, SampleFormat, SupportedBufferSize)> = None;
+    let mut seen_formats: Vec<SampleFormat> = vec![];
     let configs: Vec<_> = if input {
         device
             .supported_input_configs()
@@ -125,24 +151,33 @@ fn negotiate(device: Device, input: bool, buffer_frames: u32) -> Result<Negotiat
             .collect()
     };
     for cfg in configs {
-        if cfg.sample_format() != SampleFormat::F32 {
-            continue;
-        }
         if cfg.min_sample_rate().0 > SAMPLE_RATE || cfg.max_sample_rate().0 < SAMPLE_RATE {
             continue;
         }
-        // Prefer the fewest channels (mono capture ideal, stereo fine).
-        let candidate = (cfg.channels(), *cfg.buffer_size());
+        if !seen_formats.contains(&cfg.sample_format()) {
+            seen_formats.push(cfg.sample_format());
+        }
+        let Some(rank) = format_rank(cfg.sample_format()) else {
+            continue;
+        };
+        let candidate = (
+            rank,
+            cfg.channels(),
+            cfg.sample_format(),
+            *cfg.buffer_size(),
+        );
         match &best {
-            Some((ch, _)) if *ch <= cfg.channels() => {}
+            Some((r, ch, _, _)) if (*r, *ch) <= (rank, cfg.channels()) => {}
             _ => best = Some(candidate),
         }
     }
-    let Some((channels, supported_buffer)) = best else {
+    let Some((_, channels, sample_format, supported_buffer)) = best else {
         return Err(DeviceError::Unsupported(
             dev_name,
             kind,
-            "no f32 config covering 48000 Hz".into(),
+            format!(
+                "no convertible sample format covering 48000 Hz (device offers: {seen_formats:?})"
+            ),
         ));
     };
     let buffer_size = match supported_buffer {
@@ -157,6 +192,7 @@ fn negotiate(device: Device, input: bool, buffer_frames: u32) -> Result<Negotiat
             buffer_size,
         },
         channels,
+        sample_format,
     })
 }
 

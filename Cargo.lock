@@ -1952,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "jam-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "jam-audio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cpal",
  "jam-protocol",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "jam-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cpal",
  "crossbeam-channel",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "jam-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proptest",
  "thiserror 2.0.18",
