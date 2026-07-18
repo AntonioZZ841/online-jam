@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # The bundled libopus declares a cmake_minimum_required older than CMake
+  # 4.x accepts; this opts into the compatibility path.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install ALSA headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Fully static C runtime (Windows)
+        if: runner.os == 'Windows'
+        run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> $env:GITHUB_ENV
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --features gui -p jam-app
+      - name: Resolve tag name
+        id: tag
+        shell: bash
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="jam-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/jam" "$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          tar czf "$name.tar.gz" "$name"
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "jam-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/jam.exe" $name/
+          Copy-Item README.md,LICENSE-MIT,LICENSE-APACHE $name/
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: jam ${{ steps.tag.outputs.tag }}
+          files: |
+            jam-*.tar.gz
+            jam-*.zip
+          body: |
+            Prebuilt `jam` binaries — no Rust, CMake, or compiler needed. The
+            Opus codec is compiled in; the GUI (`--gui`) is included.
+
+            **Runtime requirements**
+            - **Windows**: none (static C runtime).
+            - **macOS**: none (system frameworks only). Downloads are
+              unsigned: on first run either right-click → Open, or run
+              `xattr -d com.apple.quarantine ./jam`.
+            - **Linux**: `libasound2` (ALSA), preinstalled on desktop
+              distributions. `--gui` additionally uses your system's GL
+              libraries.
+
+            Quickstart: unpack, then `jam host` on one machine and
+            `jam join <addr> --code <CODE>` on the others. See the bundled
+            README for NAT setup and latency tuning.
