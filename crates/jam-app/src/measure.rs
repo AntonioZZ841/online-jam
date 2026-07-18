@@ -120,7 +120,6 @@ pub fn loopback_measure(
     output_name: Option<&str>,
     buffer: u32,
 ) -> anyhow::Result<MeasureResult> {
-    use cpal::traits::{DeviceTrait, StreamTrait};
     use jam_audio::device::{open_input, open_output};
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::{Arc, Mutex};
@@ -133,67 +132,125 @@ pub fn loopback_measure(
     let armed = Arc::new(AtomicBool::new(false));
     let results: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(vec![]));
 
-    let out_channels = output.channels as usize;
-    let ct = click_time_us.clone();
-    let arm = armed.clone();
-    let mut sample_count: u64 = 0;
-    let out_stream = output
-        .device
-        .build_output_stream(
-            &output.config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                data.fill(0.0);
-                for (i, frame) in data.chunks_exact_mut(out_channels).enumerate() {
-                    // A click every 0.5 s: 32 samples of alternating polarity.
-                    let pos = (sample_count + i as u64) % 24_000;
-                    if pos < 32 {
-                        let v = if pos.is_multiple_of(2) { 0.9 } else { -0.9 };
-                        for ch in frame.iter_mut() {
-                            *ch = v;
-                        }
-                        if pos == 0 {
-                            ct.store(epoch.elapsed().as_micros() as u64, Ordering::Release);
-                            arm.store(true, Ordering::Release);
+    macro_rules! per_format {
+        ($format:expr, $build:ident, $($arg:expr),*) => {
+            match $format {
+                cpal::SampleFormat::F32 => $build::<f32>($($arg),*),
+                cpal::SampleFormat::I32 => $build::<i32>($($arg),*),
+                cpal::SampleFormat::I16 => $build::<i16>($($arg),*),
+                cpal::SampleFormat::U16 => $build::<u16>($($arg),*),
+                cpal::SampleFormat::F64 => $build::<f64>($($arg),*),
+                cpal::SampleFormat::U32 => $build::<u32>($($arg),*),
+                cpal::SampleFormat::I8 => $build::<i8>($($arg),*),
+                cpal::SampleFormat::U8 => $build::<u8>($($arg),*),
+                cpal::SampleFormat::I64 => $build::<i64>($($arg),*),
+                cpal::SampleFormat::U64 => $build::<u64>($($arg),*),
+                other => anyhow::bail!("unsupported device sample format {other:?}"),
+            }
+        };
+    }
+
+    fn build_click_output<T>(
+        output: &jam_audio::device::Negotiated,
+        epoch: Instant,
+        ct: Arc<AtomicU64>,
+        arm: Arc<AtomicBool>,
+    ) -> anyhow::Result<cpal::Stream>
+    where
+        T: cpal::SizedSample + cpal::FromSample<f32>,
+    {
+        use cpal::traits::DeviceTrait;
+        let out_channels = output.channels as usize;
+        let mut sample_count: u64 = 0;
+        output
+            .device
+            .build_output_stream(
+                &output.config,
+                move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+                    data.fill(T::from_sample(0.0f32));
+                    for (i, frame) in data.chunks_exact_mut(out_channels).enumerate() {
+                        // A click every 0.5 s: 32 samples of alternating polarity.
+                        let pos = (sample_count + i as u64) % 24_000;
+                        if pos < 32 {
+                            let v = if pos.is_multiple_of(2) { 0.9f32 } else { -0.9 };
+                            for ch in frame.iter_mut() {
+                                *ch = T::from_sample(v);
+                            }
+                            if pos == 0 {
+                                ct.store(epoch.elapsed().as_micros() as u64, Ordering::Release);
+                                arm.store(true, Ordering::Release);
+                            }
                         }
                     }
-                }
-                sample_count += data.len() as u64 / out_channels as u64;
-            },
-            |_| {},
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("output stream: {e}"))?;
+                    sample_count += data.len() as u64 / out_channels as u64;
+                },
+                |_| {},
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("output stream: {e}"))
+    }
 
-    let in_channels = input.channels as usize;
-    let ct = click_time_us.clone();
-    let arm = armed.clone();
-    let res = results.clone();
-    let in_stream = input
-        .device
-        .build_input_stream(
-            &input.config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if !arm.load(Ordering::Acquire) {
-                    return;
-                }
-                for frame in data.chunks_exact(in_channels) {
-                    if frame[0].abs() > 0.3 {
-                        let now = epoch.elapsed().as_micros() as u64;
-                        let clicked = ct.load(Ordering::Acquire);
-                        let delta_ms = (now.saturating_sub(clicked)) as f64 / 1_000.0;
-                        if delta_ms < 400.0 {
-                            res.lock().unwrap().push(delta_ms);
-                        }
-                        arm.store(false, Ordering::Release);
-                        break;
+    #[allow(clippy::type_complexity)]
+    fn build_click_input<T>(
+        input: &jam_audio::device::Negotiated,
+        epoch: Instant,
+        ct: Arc<AtomicU64>,
+        arm: Arc<AtomicBool>,
+        res: Arc<Mutex<Vec<f64>>>,
+    ) -> anyhow::Result<cpal::Stream>
+    where
+        T: cpal::SizedSample,
+        f32: cpal::FromSample<T>,
+    {
+        use cpal::traits::DeviceTrait;
+        use cpal::Sample;
+        let in_channels = input.channels as usize;
+        input
+            .device
+            .build_input_stream(
+                &input.config,
+                move |data: &[T], _: &cpal::InputCallbackInfo| {
+                    if !arm.load(Ordering::Acquire) {
+                        return;
                     }
-                }
-            },
-            |_| {},
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("input stream: {e}"))?;
+                    for frame in data.chunks_exact(in_channels) {
+                        if f32::from_sample(frame[0]).abs() > 0.3 {
+                            let now = epoch.elapsed().as_micros() as u64;
+                            let clicked = ct.load(Ordering::Acquire);
+                            let delta_ms = (now.saturating_sub(clicked)) as f64 / 1_000.0;
+                            if delta_ms < 400.0 {
+                                res.lock().unwrap().push(delta_ms);
+                            }
+                            arm.store(false, Ordering::Release);
+                            break;
+                        }
+                    }
+                },
+                |_| {},
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("input stream: {e}"))
+    }
 
+    let out_stream = per_format!(
+        output.sample_format,
+        build_click_output,
+        &output,
+        epoch,
+        click_time_us.clone(),
+        armed.clone()
+    )?;
+    let in_stream = per_format!(
+        input.sample_format,
+        build_click_input,
+        &input,
+        epoch,
+        click_time_us.clone(),
+        armed.clone(),
+        results.clone()
+    )?;
+
+    use cpal::traits::StreamTrait;
     println!("playing clicks; make sure the loopback cable connects output → input...");
     in_stream.play().map_err(|e| anyhow::anyhow!("{e}"))?;
     out_stream.play().map_err(|e| anyhow::anyhow!("{e}"))?;
