@@ -158,6 +158,13 @@ pub struct HostShared {
     pub session_id: u16,
     pub clients: [StreamShared; MAX_CLIENTS],
     pub gains: [AtomicF32; MAX_CLIENTS + 1],
+    /// Per-player mute (index 0 = host, 1..=MAX_CLIENTS = clients). A muted
+    /// player is dropped from every mix (nobody hears them; they still hear
+    /// everyone else).
+    pub muted: [AtomicBool; MAX_CLIENTS + 1],
+    /// Per-player solo (same indexing). While any player is soloed, only
+    /// soloed players are heard.
+    pub soloed: [AtomicBool; MAX_CLIENTS + 1],
     pub monitor_gain: AtomicF32,
     pub local_level: SharedLevel,
     /// Output frames where capture had no data (input/output clock slip).
@@ -171,11 +178,42 @@ impl HostShared {
             session_id,
             clients: Default::default(),
             gains: std::array::from_fn(|_| AtomicF32::new(1.0)),
+            muted: std::array::from_fn(|_| AtomicBool::new(false)),
+            soloed: std::array::from_fn(|_| AtomicBool::new(false)),
             monitor_gain: AtomicF32::new(1.0),
             local_level: SharedLevel::default(),
             capture_starved: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
         }
+    }
+
+    /// Whether a solo on player index `p` (0 = host, 1..=MAX_CLIENTS =
+    /// clients) should count: the slot must actually be audible — present
+    /// (the host is always present; a client must be active) and not muted.
+    /// This is what stops a solo left on an empty slot, or on a muted player,
+    /// from silencing the whole room.
+    fn solo_counts(&self, p: usize) -> bool {
+        if self.muted[p].load(Ordering::Relaxed) {
+            return false;
+        }
+        p == 0 || self.clients[p - 1].active.load(Ordering::Acquire)
+    }
+
+    /// True if at least one *audible* player is soloed. A solo flag stranded
+    /// on an empty slot or on a muted player does not count, so solo can
+    /// never drop the session to silence.
+    pub fn any_solo(&self) -> bool {
+        (0..self.soloed.len())
+            .any(|p| self.soloed[p].load(Ordering::Relaxed) && self.solo_counts(p))
+    }
+
+    /// Whether player `p` should be summed into the master mix. Muted players
+    /// are always excluded; when any audible player is soloed, only soloed
+    /// players are included. Pass the result of [`Self::any_solo`] so it is
+    /// evaluated once per frame.
+    pub fn in_mix(&self, p: usize, any_solo: bool) -> bool {
+        !self.muted[p].load(Ordering::Relaxed)
+            && (!any_solo || self.soloed[p].load(Ordering::Relaxed))
     }
 }
 

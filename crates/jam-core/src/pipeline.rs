@@ -167,7 +167,13 @@ impl HostPipeline {
         }
 
         // 2. Mix with smoothed per-player gains and master headroom trim.
-        let g_local = self.smoothers[0].next(shared.gains[0].get()) * MASTER_TRIM;
+        // Mute/solo fold into each player's gain target (multiply by 0 when
+        // excluded) so transitions ramp through the existing smoother — no
+        // clicks — and the mix-minus-self subtraction below stays consistent
+        // because it reuses the same scaled buffers.
+        let any_solo = shared.any_solo();
+        let incl_local = if shared.in_mix(0, any_solo) { 1.0 } else { 0.0 };
+        let g_local = self.smoothers[0].next(shared.gains[0].get() * incl_local) * MASTER_TRIM;
         let mix = &mut self.mix[..n];
         mix.fill(0.0);
         let scaled_local = &mut self.scaled_local[..n];
@@ -178,7 +184,12 @@ impl HostPipeline {
             *d += *s;
         }
         for c in 0..MAX_CLIENTS {
-            let g = self.smoothers[c + 1].next(shared.gains[c + 1].get()) * MASTER_TRIM;
+            let incl = if shared.in_mix(c + 1, any_solo) {
+                1.0
+            } else {
+                0.0
+            };
+            let g = self.smoothers[c + 1].next(shared.gains[c + 1].get() * incl) * MASTER_TRIM;
             let src = &self.decoded[c][..n];
             let dst = &mut self.scaled[c][..n];
             for (d, s) in dst.iter_mut().zip(src) {
@@ -432,6 +443,115 @@ mod tests {
             (pcm[n / 2] - expect_c0).abs() < 0.02,
             "client0 hears {}, expected ~{expect_c0}",
             pcm[n / 2]
+        );
+    }
+
+    /// Encode a constant-value PCM-f32 frame of `n` samples.
+    fn enc_const(v: f32, n: usize) -> Vec<u8> {
+        let pcm = vec![v; n];
+        let mut enc = AudioEncoder::new(Codec::PcmF32, 48_000, 0).unwrap();
+        let mut buf = vec![0u8; n * 4];
+        let len = enc.encode(&pcm, &mut buf).unwrap();
+        buf.truncate(len);
+        buf
+    }
+
+    /// Run the host over many frames with two active clients emitting constant
+    /// levels, keeping both jitter buffers fed, and return the steady host-out
+    /// value (host is silent + monitor Off, so it hears exactly the mix).
+    fn steady_host_out(configure: impl FnOnce(&HostShared)) -> f32 {
+        let p = params();
+        let n = p.frame_samples;
+        let shared = HostShared::new(7);
+        let mut hp = HostPipeline::new(&p).unwrap();
+        shared.clients[0].active.store(true, Ordering::Release);
+        shared.clients[1].active.store(true, Ordering::Release);
+        configure(&shared);
+
+        let local_in = vec![0.0f32; n];
+        let mut host_out = vec![0.0f32; n];
+        let mut seq = 0u16;
+        // Prime a couple of frames ahead of the reader.
+        for _ in 0..3 {
+            shared.clients[0]
+                .jb
+                .push(seq, seq as u32 * 120, &enc_const(0.4, n));
+            shared.clients[1]
+                .jb
+                .push(seq, seq as u32 * 120, &enc_const(0.2, n));
+            seq = seq.wrapping_add(1);
+        }
+        // Run well past the ~10 ms gain-smoother settle time, feeding one
+        // fresh frame per tick so neither buffer starves.
+        for _ in 0..60 {
+            shared.clients[0]
+                .jb
+                .push(seq, seq as u32 * 120, &enc_const(0.4, n));
+            shared.clients[1]
+                .jb
+                .push(seq, seq as u32 * 120, &enc_const(0.2, n));
+            seq = seq.wrapping_add(1);
+            hp.process_frame(&shared, &local_in, &mut host_out, |_, _| {});
+        }
+        host_out[n / 2]
+    }
+
+    #[test]
+    fn muting_a_player_removes_it_from_the_mix() {
+        // Both active → host hears (0.4 + 0.2) * trim = 0.30.
+        let both = steady_host_out(|_| {});
+        assert!((both - 0.30).abs() < 0.02, "both active: {both}");
+        // Mute client 1 (gain index 2) → only client 0 remains: 0.4 * 0.5.
+        let muted = steady_host_out(|s| s.muted[2].store(true, Ordering::Relaxed));
+        assert!(
+            (muted - 0.20).abs() < 0.02,
+            "client1 muted: {muted}, expected ~0.20"
+        );
+    }
+
+    #[test]
+    fn soloing_isolates_to_soloed_players() {
+        // Solo client 0 (gain index 1): only client 0 is heard.
+        let solo0 = steady_host_out(|s| s.soloed[1].store(true, Ordering::Relaxed));
+        assert!(
+            (solo0 - 0.20).abs() < 0.02,
+            "solo client0: {solo0}, expected ~0.20 (0.4*trim)"
+        );
+        // Solo client 1 instead: only client 1 (0.2 * 0.5 = 0.10).
+        let solo1 = steady_host_out(|s| s.soloed[2].store(true, Ordering::Relaxed));
+        assert!(
+            (solo1 - 0.10).abs() < 0.02,
+            "solo client1: {solo1}, expected ~0.10 (0.2*trim)"
+        );
+        // Solo the host itself (index 0, silent here): clients are excluded,
+        // and since the host feeds no signal the mix is empty.
+        let solo_host = steady_host_out(|s| s.soloed[0].store(true, Ordering::Relaxed));
+        assert!(
+            solo_host.abs() < 0.02,
+            "solo silent host: {solo_host}, expected ~0"
+        );
+    }
+
+    #[test]
+    fn solo_on_a_non_audible_slot_does_not_silence_the_room() {
+        // Muting the only soloed player must not count as an active solo:
+        // the room falls back to a normal mix (client1 still heard), never
+        // to silence.
+        let solo_then_mute = steady_host_out(|s| {
+            s.soloed[1].store(true, Ordering::Relaxed);
+            s.muted[1].store(true, Ordering::Relaxed);
+        });
+        assert!(
+            (solo_then_mute - 0.10).abs() < 0.02,
+            "solo+mute the same player should fall back to the rest of the \
+             mix (~0.10), not silence: {solo_then_mute}"
+        );
+        // Soloing an empty/inactive slot (index 3 — clients[2] is not active
+        // in this harness) is a no-op, not a room-killer.
+        let solo_empty = steady_host_out(|s| s.soloed[3].store(true, Ordering::Relaxed));
+        assert!(
+            (solo_empty - 0.30).abs() < 0.02,
+            "solo on an empty slot must leave the full mix (~0.30): {solo_empty}"
         );
     }
 

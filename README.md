@@ -53,11 +53,15 @@ $ jam join 203.0.113.7:47820 --code QX3JD7 --name maria
 ```
 
 The status display shows per-player level meters, packet loss, jitter-buffer
-depth, RTT, and an estimated mouth-to-ear latency. Adjust per-player gains
-with the keyboard (`0-4` select, `+`/`-` adjust).
+depth, RTT, and an estimated mouth-to-ear latency. As the host you run the
+mix: select a player with `0-4`, then `+`/`-` adjusts their gain, `m` mutes
+them (dropped from everyone's mix; they still hear the room), and `s` solos
+them (while anything is soloed, only soloed players are heard). Mute/solo
+fade in and out over ~10 ms, so toggling them mid-song doesn't click.
 
 Prefer a window? Build with the GUI and pass `--gui` to `host`/`join` for
-an egui session window with faders and meters:
+an egui session window with faders, meters, and per-player **M**/**S**
+buttons:
 
 ```console
 $ cargo build --release --features gui

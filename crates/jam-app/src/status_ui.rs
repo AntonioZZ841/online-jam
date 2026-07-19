@@ -1,6 +1,7 @@
 //! Terminal status display + keyboard control, refreshed twice a second.
 //!
-//! Keys (host): 0-4 select player, +/- adjust their gain, q quit.
+//! Keys (host): 0-4 select player, +/- adjust their gain, m mute, s solo,
+//! q quit.
 //! Keys (client): +/- master volume, [/] monitor volume, q quit.
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -49,7 +50,16 @@ fn meter_bar(rms_db: f32, peak_db: f32) -> String {
     bar
 }
 
-fn render(snap: &Snapshot, selected: usize, gains: &[f32], xruns: u64) -> String {
+fn render(
+    snap: &Snapshot,
+    selected: usize,
+    gains: &[f32],
+    muted: &[bool],
+    soloed: &[bool],
+    xruns: u64,
+) -> String {
+    let is_host = snap.role == Role::Host;
+    let any_solo = soloed.iter().any(|&s| s);
     let mut out = String::new();
     out.push_str(&format!("  {}\r\n", snap.status));
     out.push_str(&format!(
@@ -57,20 +67,36 @@ fn render(snap: &Snapshot, selected: usize, gains: &[f32], xruns: u64) -> String
         snap.est_latency_ms, xruns, snap.capture_starved
     ));
     out.push_str(
-        "     player            level                  loss    jitter  buffer   rtt   gain\r\n",
+        "     player            level                  loss    jitter  buffer   rtt   gain  m/s\r\n",
     );
     for p in &snap.players {
-        let sel = if snap.role == Role::Host && p.id as usize == selected {
-            '>'
-        } else {
-            ' '
-        };
+        let idx = p.id as usize;
+        let sel = if is_host && idx == selected { '>' } else { ' ' };
         let gain = gains
-            .get(p.id as usize)
+            .get(idx)
             .map(|g| format!("{:>4.1}", 20.0 * g.max(1e-3).log10()))
             .unwrap_or_else(|| "  - ".into());
+        // Mute/solo markers, host only. A player silenced by someone else's
+        // solo shows a dim 's' so it's clear why they've gone quiet.
+        let flags = if is_host {
+            let m = if muted.get(idx).copied().unwrap_or(false) {
+                'M'
+            } else {
+                '·'
+            };
+            let s = if soloed.get(idx).copied().unwrap_or(false) {
+                'S'
+            } else if any_solo {
+                's'
+            } else {
+                '·'
+            };
+            format!(" {m}{s}")
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "  {sel} {:<2} {:<12} [{}] {:>5.1}%  {:>5.1}ms {:>5.1}ms {:>5.1}ms  {gain}dB\r\n",
+            "  {sel} {:<2} {:<12} [{}] {:>5.1}%  {:>5.1}ms {:>5.1}ms {:>5.1}ms  {gain}dB {flags}\r\n",
             p.id,
             truncate(&p.name, 12),
             meter_bar(p.rms_db, p.peak_db),
@@ -82,7 +108,9 @@ fn render(snap: &Snapshot, selected: usize, gains: &[f32], xruns: u64) -> String
     }
     out.push_str("\r\n");
     match snap.role {
-        Role::Host => out.push_str("  keys: 0-4 select player · +/- gain · q quit\r\n"),
+        Role::Host => {
+            out.push_str("  keys: 0-4 select player · +/- gain · m mute · s solo · q quit\r\n")
+        }
         Role::Client => out.push_str("  keys: +/- master volume · [/] monitor volume · q quit\r\n"),
     }
     out
@@ -126,7 +154,14 @@ pub fn run(
                 match (&shared, key.code) {
                     (UiShared::Host(h), KeyCode::Char(c @ '0'..='4')) => {
                         let idx = c as usize - '0' as usize;
-                        if idx < h.gains.len() {
+                        // Only the host (0) or a currently-active client slot
+                        // is selectable, so gain/mute/solo keys can't land on
+                        // an empty slot.
+                        let selectable = idx == 0
+                            || h.clients
+                                .get(idx - 1)
+                                .is_some_and(|s| s.active.load(Ordering::Acquire));
+                        if selectable {
                             selected = idx;
                         }
                     }
@@ -137,6 +172,14 @@ pub fn run(
                     (UiShared::Host(h), KeyCode::Char('-')) => {
                         let g = &h.gains[selected];
                         g.set(adjust_db(g.get(), -1.0));
+                    }
+                    (UiShared::Host(h), KeyCode::Char('m')) => {
+                        let f = &h.muted[selected];
+                        f.store(!f.load(Ordering::Relaxed), Ordering::Relaxed);
+                    }
+                    (UiShared::Host(h), KeyCode::Char('s')) => {
+                        let f = &h.soloed[selected];
+                        f.store(!f.load(Ordering::Relaxed), Ordering::Relaxed);
                     }
                     (UiShared::Client(c), KeyCode::Char('+' | '=')) => {
                         c.master_gain.set(adjust_db(c.master_gain.get(), 1.0));
@@ -158,12 +201,35 @@ pub fn run(
 
         if last_draw.elapsed() >= Duration::from_millis(500) {
             last_draw = Instant::now();
+            // If the selected client has since left, fall back to the host row
+            // so the selector never points at an empty slot.
+            if let UiShared::Host(h) = &shared {
+                if selected != 0
+                    && !h
+                        .clients
+                        .get(selected - 1)
+                        .is_some_and(|s| s.active.load(Ordering::Acquire))
+                {
+                    selected = 0;
+                }
+            }
             let snap = snapshot.lock().unwrap().clone();
-            let gains: Vec<f32> = match &shared {
-                UiShared::Host(h) => h.gains.iter().map(|g| g.get()).collect(),
-                UiShared::Client(c) => vec![c.master_gain.get()],
+            let (gains, muted, soloed): (Vec<f32>, Vec<bool>, Vec<bool>) = match &shared {
+                UiShared::Host(h) => (
+                    h.gains.iter().map(|g| g.get()).collect(),
+                    h.muted.iter().map(|f| f.load(Ordering::Relaxed)).collect(),
+                    h.soloed.iter().map(|f| f.load(Ordering::Relaxed)).collect(),
+                ),
+                UiShared::Client(c) => (vec![c.master_gain.get()], vec![], vec![]),
             };
-            let body = render(&snap, selected, &gains, xruns.load(Ordering::Relaxed));
+            let body = render(
+                &snap,
+                selected,
+                &gains,
+                &muted,
+                &soloed,
+                xruns.load(Ordering::Relaxed),
+            );
             let _ = execute!(
                 stdout,
                 cursor::MoveTo(0, 0),
