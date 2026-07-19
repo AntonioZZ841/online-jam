@@ -61,6 +61,18 @@ fn gain_slider(ui: &mut eframe::egui::Ui, label: &str, gain: &AtomicF32) {
     }
 }
 
+/// A latching on/off button backed by an `AtomicBool` (mute / solo).
+fn toggle(ui: &mut eframe::egui::Ui, flag: Option<&std::sync::atomic::AtomicBool>, label: &str) {
+    if let Some(flag) = flag {
+        let on = flag.load(Ordering::Relaxed);
+        if ui.selectable_label(on, label).clicked() {
+            flag.store(!on, Ordering::Relaxed);
+        }
+    } else {
+        ui.label("");
+    }
+}
+
 fn level_bar(ui: &mut eframe::egui::Ui, rms_db: f32, peak_db: f32) {
     let frac = ((rms_db + 60.0) / 60.0).clamp(0.0, 1.0);
     let bar = eframe::egui::ProgressBar::new(frac)
@@ -98,6 +110,8 @@ impl eframe::App for JamApp {
                     ui.strong("rtt");
                     if matches!(self.shared, UiShared::Host(_)) {
                         ui.strong("gain");
+                        ui.strong("mute");
+                        ui.strong("solo");
                     }
                     ui.end_row();
 
@@ -109,7 +123,8 @@ impl eframe::App for JamApp {
                         ui.label(format!("{:.1} ms", p.buffer_ms));
                         ui.label(format!("{:.1} ms", p.rtt_ms));
                         if let UiShared::Host(h) = &self.shared {
-                            if let Some(gain) = h.gains.get(p.id as usize) {
+                            let idx = p.id as usize;
+                            if let Some(gain) = h.gains.get(idx) {
                                 let mut db = db_of(gain);
                                 let slider = eframe::egui::Slider::new(&mut db, -40.0..=12.0)
                                     .suffix(" dB")
@@ -118,6 +133,8 @@ impl eframe::App for JamApp {
                                     set_db(gain, db);
                                 }
                             }
+                            toggle(ui, h.muted.get(idx), "M");
+                            toggle(ui, h.soloed.get(idx), "S");
                         }
                         ui.end_row();
                     }
