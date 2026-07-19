@@ -523,14 +523,35 @@ mod tests {
             (solo1 - 0.10).abs() < 0.02,
             "solo client1: {solo1}, expected ~0.10 (0.2*trim)"
         );
-        // A muted-but-soloed player stays silent (mute wins).
-        let solo_muted = steady_host_out(|s| {
+        // Solo the host itself (index 0, silent here): clients are excluded,
+        // and since the host feeds no signal the mix is empty.
+        let solo_host = steady_host_out(|s| s.soloed[0].store(true, Ordering::Relaxed));
+        assert!(
+            solo_host.abs() < 0.02,
+            "solo silent host: {solo_host}, expected ~0"
+        );
+    }
+
+    #[test]
+    fn solo_on_a_non_audible_slot_does_not_silence_the_room() {
+        // Muting the only soloed player must not count as an active solo:
+        // the room falls back to a normal mix (client1 still heard), never
+        // to silence.
+        let solo_then_mute = steady_host_out(|s| {
             s.soloed[1].store(true, Ordering::Relaxed);
             s.muted[1].store(true, Ordering::Relaxed);
         });
         assert!(
-            solo_muted.abs() < 0.02,
-            "solo+mute on same player should be silent: {solo_muted}"
+            (solo_then_mute - 0.10).abs() < 0.02,
+            "solo+mute the same player should fall back to the rest of the \
+             mix (~0.10), not silence: {solo_then_mute}"
+        );
+        // Soloing an empty/inactive slot (index 3 — clients[2] is not active
+        // in this harness) is a no-op, not a room-killer.
+        let solo_empty = steady_host_out(|s| s.soloed[3].store(true, Ordering::Relaxed));
+        assert!(
+            (solo_empty - 0.30).abs() < 0.02,
+            "solo on an empty slot must leave the full mix (~0.30): {solo_empty}"
         );
     }
 

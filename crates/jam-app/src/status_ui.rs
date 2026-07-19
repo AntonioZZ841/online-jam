@@ -154,7 +154,14 @@ pub fn run(
                 match (&shared, key.code) {
                     (UiShared::Host(h), KeyCode::Char(c @ '0'..='4')) => {
                         let idx = c as usize - '0' as usize;
-                        if idx < h.gains.len() {
+                        // Only the host (0) or a currently-active client slot
+                        // is selectable, so gain/mute/solo keys can't land on
+                        // an empty slot.
+                        let selectable = idx == 0
+                            || h.clients
+                                .get(idx - 1)
+                                .is_some_and(|s| s.active.load(Ordering::Acquire));
+                        if selectable {
                             selected = idx;
                         }
                     }
@@ -194,6 +201,18 @@ pub fn run(
 
         if last_draw.elapsed() >= Duration::from_millis(500) {
             last_draw = Instant::now();
+            // If the selected client has since left, fall back to the host row
+            // so the selector never points at an empty slot.
+            if let UiShared::Host(h) = &shared {
+                if selected != 0
+                    && !h
+                        .clients
+                        .get(selected - 1)
+                        .is_some_and(|s| s.active.load(Ordering::Acquire))
+                {
+                    selected = 0;
+                }
+            }
             let snap = snapshot.lock().unwrap().clone();
             let (gains, muted, soloed): (Vec<f32>, Vec<bool>, Vec<bool>) = match &shared {
                 UiShared::Host(h) => (
