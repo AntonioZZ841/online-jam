@@ -142,6 +142,10 @@ pub fn spawn_host_control(
                             // arrives from the client.
                             stream.last_rx_us.store(0, Ordering::Release);
                             stream.rtt_us.store(0, Ordering::Relaxed);
+                            // Start with a clean mix state: a reused slot must
+                            // not inherit the previous occupant's mute/solo.
+                            shared.muted[sender_id as usize].store(false, Ordering::Relaxed);
+                            shared.soloed[sender_id as usize].store(false, Ordering::Relaxed);
                             stream.active.store(true, Ordering::Release);
                             names[slot] = Some(name);
                             let update = AddrUpdate::Client {
@@ -156,6 +160,11 @@ pub fn spawn_host_control(
                             let stream = &shared.clients[slot];
                             stream.active.store(false, Ordering::Release);
                             stream.jb.reset();
+                            // Clear this player's mute/solo so a departed
+                            // soloist can't silence the room and the slot is
+                            // fresh for whoever takes it next.
+                            shared.muted[sender_id as usize].store(false, Ordering::Relaxed);
+                            shared.soloed[sender_id as usize].store(false, Ordering::Relaxed);
                             names[slot] = None;
                             let update = AddrUpdate::Client {
                                 slot: slot as u8,
